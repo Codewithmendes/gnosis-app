@@ -7,22 +7,18 @@
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body, #root { height: 100%; }
-    body { background: #07080f; }
-  </style>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>* { margin:0; padding:0; box-sizing:border-box; } html,body,#root { height:100%; } body { background:#07080f; }</style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
 const { useState, useRef, useEffect, useCallback } = React;
 
-
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const BACKEND = "https://gnosis-backend-production-e3ca.up.railway.app";
 
-const GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID = "96873408972-e6m0cqs4i274ret164cjmhfnrdmlt76b.apps.googleusercontent.com";
 
 
 
@@ -518,16 +514,13 @@ ${fcInput.slice(0,3000)}` }] })
     if (!explainImg) return;
     setExplainLoading(true); setExplainResult("");
     try {
-      const r = await fetch(`${BACKEND}/api/chat`, {
+      const r = await fetch(`${BACKEND}/api/explain`, {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ messages:[{ role:"user", content:[
-          { type:"image", source:{ type:"base64", media_type:explainImg.type, data:explainImg.data }},
-          { type:"text", text:"You are a university tutor. Look at this image — it could be a textbook page, handwritten note, diagram, or equation. Explain everything you see clearly and simply. Break down key concepts, define any terms, and help the student understand it fully. Write in plain flowing prose, no bullet points." }
-        ]}] })
+        body: JSON.stringify({ imageData: explainImg.data, mimeType: explainImg.type })
       });
       const d = await r.json();
-      setExplainResult(d.reply||"");
-    } catch { setExplainResult("Failed. Check connection."); }
+      setExplainResult(d.reply || "Could not explain image.");
+    } catch (e) { setExplainResult("Failed. Check connection."); }
     setExplainLoading(false);
   };
 
@@ -565,7 +558,6 @@ ${fcInput.slice(0,3000)}` }] })
       const reply = d.reply || "No response.";
       const updated = [...next, { role:"assistant", content:reply }];
       setMsgs(updated);
-      speak(reply);
       if (updated.length % 6 === 0) extractInsights(updated);
     } catch (e) {
       setMsgs(prev => [...prev, { role:"assistant", content:`Connection error. (${e.message})` }]);
@@ -649,7 +641,6 @@ ${fcInput.slice(0,3000)}` }] })
       });
       const d = await r.json();
       setArtifact({ type, content:d.reply||"" });
-      if (type==="audio_overview") speak(d.reply||"");
     } catch { alert("Generation failed."); }
     setArtLoading(false);
   });
@@ -664,7 +655,7 @@ ${fcInput.slice(0,3000)}` }] })
         body: JSON.stringify({
           content: slides[mcqSrc]?.preview||slides[mcqSrc]?.name,
           sourceName: slides[mcqSrc]?.name,
-          systemHint: `You are a DUFUHS CCMAS exam question generator. Generate exactly 10 multiple-choice questions strictly based on the provided lecture content. Follow CCMAS/Nigerian university exam style: each question must have 4 options (A–D), one correct answer, and a brief explanation. Cover a spread of topics from the content. Questions should test understanding, not just recall. Format each as: Q[n]. [question]\nA. [option]\nB. [option]\nC. [option]\nD. [option]\nAnswer: [letter]\nExplanation: [1–2 sentences]. No asterisks. No markdown.`
+          systemHint: `You are a DUFUHS CCMAS exam question generator. NEVER use asterisks, bold, or any markdown formatting. Generate exactly 10 multiple-choice questions strictly based on the provided lecture content. Follow CCMAS/Nigerian university exam style: each question must have 4 options (A–D), one correct answer, and a brief explanation. Cover a spread of topics from the content. Questions should test understanding, not just recall. Format each as: Q[n]. [question]\nA. [option]\nB. [option]\nC. [option]\nD. [option]\nAnswer: [letter]\nExplanation: [1–2 sentences]. No asterisks. No markdown.`
         })
       });
       const d = await r.json();
@@ -678,7 +669,7 @@ ${fcInput.slice(0,3000)}` }] })
     const correct = opt.startsWith(mcqs[qi]?.answer);
     setAns({ chosen:opt, correct });
     setScore(p => ({ c:p.c+(correct?1:0), t:p.t+1 }));
-    speak(correct ? "Correct. " + mcqs[qi]?.explanation : "Wrong. " + mcqs[qi]?.explanation);
+    // speak removed
   };
 
   // ── GROUP STUDY ROOMS ─────────────────────────────────────────────────────
@@ -1575,7 +1566,6 @@ Rules:
     </div>
   );
 }
-
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Gnosis));
   </script>
 </body>
