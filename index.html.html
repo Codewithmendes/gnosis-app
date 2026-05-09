@@ -18,6 +18,7 @@ const { useState, useRef, useEffect, useCallback } = React;
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const BACKEND = "https://gnosis-backend-production-e3ca.up.railway.app";
 
+const WS_URL = BACKEND.replace("https://","wss://").replace("http://","ws://");
 const GOOGLE_CLIENT_ID = "96873408972-e6m0cqs4i274ret164cjmhfnrdmlt76b.apps.googleusercontent.com";
 
 
@@ -205,7 +206,7 @@ function Gnosis() {
   // Auth
   const [user, setUser] = useState(() => { try { return JSON.parse(localStorage.getItem("g_user")) || null; } catch { return null; } });
   const [showAuth, setShowAuth] = useState(false);
-  const [authStep, setAuthStep] = useState("form"); // form | verify
+  const [authStep, setAuthStep] = useState("form"); // form | verify | sending
   const [authForm, setAuthForm] = useState({ email:"", password:"" });
   const [otp, setOtp] = useState("");
   const [otpExpiry, setOtpExpiry] = useState(null);
@@ -226,7 +227,10 @@ function Gnosis() {
   const ttsOK = "speechSynthesis" in window;
 
   // Sources
-  const [slides, setSlides] = useState([]);
+  const [slides, setSlides] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("g_slides")||"[]"); } catch { return []; }
+  });
+  const saveSlides = (s) => { setSlides(s); try { localStorage.setItem("g_slides", JSON.stringify(s)); } catch {} };
   const [pasteText, setPasteText] = useState("");
   const [pasteTitle, setPasteTitle] = useState("");
   const [dragOver, setDragOver] = useState(false);
@@ -238,6 +242,9 @@ function Gnosis() {
   // MCQ
   const [mcqs, setMcqs] = useState([]);
   const [qi, setQi] = useState(0);
+  const [quizTimer, setQuizTimer] = useState(null);
+  const [quizTimeLeft, setQuizTimeLeft] = useState(0);
+  const quizTimerRef = useRef(null);
   const [ans, setAns] = useState(null);
   const [score, setScore] = useState({ c:0, t:0 });
   const [genMCQ, setGenMCQ] = useState(false);
@@ -248,6 +255,10 @@ function Gnosis() {
   const [currentRoom, setCurrentRoom] = useState(null);
   const [roomInput, setRoomInput] = useState("");
   const [roomName, setRoomName] = useState("");
+  const [wsConn, setWsConn] = useState(null);
+  const [wsRoom, setWsRoom] = useState(null); // { name, code, members, messages }
+  const [wsStatus, setWsStatus] = useState("disconnected"); // connecting|connected|disconnected
+  const [wsJoinCode, setWsJoinCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [roomLoading, setRoomLoading] = useState(false);
   const [roomMsg, setRoomMsg] = useState("");
@@ -303,6 +314,15 @@ function Gnosis() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior:"smooth" }); }, [msgs, loading]);
   useEffect(() => { roomBottomRef.current?.scrollIntoView({ behavior:"smooth" }); }, [rooms, currentRoom]);
+  useEffect(() => {
+    if (quizTimeLeft > 0 && mcqs.length > 0 && !ans) {
+      quizTimerRef.current = setInterval(() => {
+        setQuizTimeLeft(t => { if (t <= 1) { clearInterval(quizTimerRef.current); return 0; } return t-1; });
+      }, 1000);
+    }
+    return () => clearInterval(quizTimerRef.current);
+  }, [qi, ans, mcqs.length]);
+
   useEffect(() => { fetch(`${BACKEND}/api/slides`).then(r=>r.json()).then(d=>{ if(d.slides) setSlides(d.slides); }).catch(()=>{}); }, []);
 
   // OTP countdown
@@ -351,7 +371,7 @@ function Gnosis() {
 
   // ── EMAIL AUTH ────────────────────────────────────────────────────────────
   const sendOTP = async () => {
-    if (!authForm.email || !authForm.password) { setAuthErr("Enter email and password."); return; }
+    if (!authForm.email) { setAuthErr("Enter your email address."); return; }
     setAuthLoading(true); setAuthErr("");
     try {
       const r = await fetch(`${BACKEND}/api/auth/send-otp`, {
@@ -591,7 +611,7 @@ ${fcInput.slice(0,3000)}` }] })
     try {
       await fetch(`${BACKEND}/api/slides/upload`, { method:"POST", body:form });
       const s = await fetch(`${BACKEND}/api/slides`).then(r=>r.json());
-      if (s.slides) setSlides(s.slides);
+      if (s.slides) saveSlides(s.slides);
     } catch { alert("Upload failed."); }
     setUploading(false);
   };
@@ -603,13 +623,13 @@ ${fcInput.slice(0,3000)}` }] })
       await fetch(`${BACKEND}/api/slides/add`, { method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ name:pasteTitle||`Lecture Note ${slides.length+1}`, content:pasteText }) });
       const s = await fetch(`${BACKEND}/api/slides`).then(r=>r.json());
-      if (s.slides) setSlides(s.slides);
+      if (s.slides) saveSlides(s.slides);
       setPasteText(""); setPasteTitle("");
     } catch { alert("Failed."); }
     setUploading(false);
   };
 
-  const removeSlide = async i => { try { await fetch(`${BACKEND}/api/slides/${i}`, { method:"DELETE" }); setSlides(p => p.filter((_,j)=>j!==i)); } catch {} };
+  const removeSlide = async i => { try { await fetch(`${BACKEND}/api/slides/${i}`, { method:"DELETE" }); saveSlides(slides.filter((_,j)=>j!==i)); } catch {} };
 
   // ── ARTIFACTS ────────────────────────────────────────────────────────────
   const ARTIFACTS = {
@@ -659,7 +679,7 @@ ${fcInput.slice(0,3000)}` }] })
         })
       });
       const d = await r.json();
-      if (d.mcqs) { setMcqs(d.mcqs); setQi(0); setAns(null); setScore({c:0,t:0}); navTo("quiz"); }
+      if (d.mcqs) { setMcqs(d.mcqs); setQi(0); setAns(null); setScore({c:0,t:0}); setQuizTimeLeft(d.mcqs.length*30); navTo("quiz"); }
     } catch { alert("Failed."); }
     setGenMCQ(false);
   });
@@ -747,7 +767,7 @@ ${fcInput.slice(0,3000)}` }] })
   const genPastQ = () => gated("pastq", async () => {
     if (!pq.course) return;
     setPqLoading(true);
-    const prompt = `You are a Nigerian university past questions expert with access to past examination papers from DUFUHS, EBSU, UNN, UNIBEN, UI, ABU, UNILAG, LUTH, UNIJOS and other Nigerian health sciences universities.
+    const prompt = `You are a past questions expert with deep knowledge of examination papers from Nigerian universities including DUFUHS, EBSU, UNN, UNIBEN, UI, ABU Zaria, UNILAG, LUTH, UNIJOS, OAU, UNIPORT, UNICAL, Madonna University and other Nigerian health sciences and polytechnic institutions. You have studied thousands of past question papers across all medical, health sciences, and natural sciences disciplines.
 
 Generate realistic past examination questions for the following course exactly as they appear in Nigerian university exam papers:
 
@@ -790,12 +810,15 @@ Instructions: Answer ANY 2 questions. Each question carries 15 marks.
 ---
 
 Rules:
-- Questions must reflect the actual syllabus and difficulty level for ${pq.level||"university"} level in Nigerian universities
-- For health science courses (Anatomy, Physiology, Biochemistry, Pharmacology, Pathology, Microbiology, Nursing, Pharmacy) use clinical Nigerian context
-- For CCMAS courses (Computer Science, Maths, Statistics, Physics, Chemistry, Biology) use appropriate technical depth
-- Include marking guides for theory sections
-- No asterisks, no markdown formatting, use plain text only
-- Number questions clearly`;
+- Base questions on ACTUAL topics typically examined at ${pq.level||"university"} level in Nigerian universities for this subject
+- For MBBS/health science courses: use clinical scenarios, drug names, anatomical terms, pathological conditions common in Nigerian medical examinations
+- For Basic Medical Sciences: include biochemical pathways, physiological mechanisms, anatomical structures
+- For Computer Science/Engineering: include algorithms, data structures, programming concepts, software engineering principles
+- For Pure Sciences (Maths, Physics, Chemistry, Biology): include calculations, diagrams descriptions, laboratory procedures
+- Each objective question must have exactly one clearly correct answer
+- Theory questions must have detailed model answers and mark allocation
+- Write exactly like Nigerian university exam papers - formal, precise, unambiguous
+- No asterisks, no markdown, plain text only, number all questions clearly`;
 
     try {
       const r = await fetch(`${BACKEND}/api/chat`, {
@@ -832,8 +855,8 @@ Rules:
   const Field = ({ label, val, set, ph, type="text" }) => (
     <div style={{ marginBottom:14 }}>
       {label && <Label>{label}</Label>}
-      <input type={type} value={val} onChange={e=>set(e.target.value)} placeholder={ph}
-        className="glass-input"
+      <input type={type} defaultValue={val} onInput={e=>set(e.target.value)} placeholder={ph}
+        className="glass-input" autoComplete="off"
         style={{ width:"100%", borderRadius:10, padding:"10px 14px", color:T.text, fontSize:15 }}/>
     </div>
   );
@@ -871,55 +894,71 @@ Rules:
 
   // ── AUTH MODAL ────────────────────────────────────────────────────────────
   const AuthModal = () => (
-    <div style={{ position:"fixed",inset:0,background:"rgba(0,0,0,.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:20 }}>
-      <div className="glass-card" style={{ padding:28,width:"100%",maxWidth:380,animation:"modalIn .25s ease",backdropFilter:"blur(32px)",WebkitBackdropFilter:"blur(32px)" }}>
-        <h3 style={{ fontSize:18,fontWeight:600,color:T.text,marginBottom:4 }}>{authStep==="verify"?"Check your email":"Welcome to Gnosis"}</h3>
-        <p style={{ color:T.sub,fontSize:14,lineHeight:1.65,marginBottom:20 }}>
-          {authStep==="verify"
-            ? `We sent a 6-digit code to ${authForm.email}. Expires in ${Math.floor(otpLeft/60)}:${String(otpLeft%60).padStart(2,"0")}.`
-            : "Sign in or create an account to get started."}
-        </p>
+    <div style={{ position:"fixed",inset:0,background:"rgba(0,0,0,.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,padding:20 }}>
+      <div className="glass-card" style={{ padding:28,width:"100%",maxWidth:400,animation:"modalIn .25s ease",backdropFilter:"blur(32px)",WebkitBackdropFilter:"blur(32px)" }}>
+        
+        {/* Header */}
+        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20 }}>
+          <div>
+            <p style={{ fontFamily:"'Cinzel',serif",fontSize:15,fontWeight:600,color:T.gold,letterSpacing:2 }}>GNOSIS</p>
+            <p style={{ color:T.sub,fontSize:13,marginTop:2 }}>Sign in to your account</p>
+          </div>
+          <button onClick={()=>{setShowAuth(false);setAuthStep("form");setOtp("");setAuthErr("");}}
+            style={{ background:"none",border:"none",color:T.muted,fontSize:20,lineHeight:1,padding:4 }}>×</button>
+        </div>
+
         {authErr && <div style={{ background:"rgba(239,68,68,.08)",border:`1px solid rgba(239,68,68,.25)`,borderRadius:8,padding:"9px 12px",marginBottom:14,color:T.red,fontSize:13 }}>{authErr}</div>}
 
-        {authStep==="form" ? (
-          <>
-            {/* Google button */}
-            <button onClick={googleLogin} disabled={authLoading}
-              style={{ width:"100%",background:T.input,border:`1px solid ${T.border}`,borderRadius:10,padding:"11px 16px",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:16,transition:"all .2s",color:T.text,fontSize:14,fontWeight:500 }}
-              onMouseEnter={e=>e.currentTarget.style.borderColor=T.gold}
-              onMouseLeave={e=>e.currentTarget.style.borderColor=T.border}>
-              <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-              Continue with Google
-            </button>
+        {/* Google */}
+        <button onClick={googleLogin} disabled={authLoading}
+          style={{ width:"100%",background:T.input,border:`1px solid ${T.border}`,borderRadius:10,padding:"11px 16px",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:16,color:T.text,fontSize:14,fontWeight:500,transition:"all .2s" }}
+          onMouseEnter={e=>e.currentTarget.style.borderColor=T.gold}
+          onMouseLeave={e=>e.currentTarget.style.borderColor=T.border}>
+          <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Continue with Google
+        </button>
 
-            <div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:16 }}>
-              <div style={{ flex:1,height:1,background:T.border }}/>
-              <span style={{ color:T.muted,fontSize:12 }}>or</span>
-              <div style={{ flex:1,height:1,background:T.border }}/>
-            </div>
+        <div style={{ display:"flex",alignItems:"center",gap:10,marginBottom:16 }}>
+          <div style={{ flex:1,height:1,background:T.border }}/>
+          <span style={{ color:T.muted,fontSize:12 }}>or use email</span>
+          <div style={{ flex:1,height:1,background:T.border }}/>
+        </div>
 
-            <Field label="Email" val={authForm.email} set={v=>setAuthForm(p=>({...p,email:v}))} ph="your@email.com" type="email"/>
-            <Field label="Password" val={authForm.password} set={v=>setAuthForm(p=>({...p,password:v}))} ph="6+ characters" type="password"/>
-            <div style={{ display:"flex",gap:8,marginTop:4 }}>
-              <Btn variant="solid" full onClick={sendOTP} disabled={authLoading}>{authLoading?"Sending code...":"Send verification code"}</Btn>
-            </div>
-          </>
-        ) : (
+        {/* Email field — always visible */}
+        <div style={{ marginBottom:12 }}>
+          <p style={{ fontSize:11,fontWeight:600,color:T.muted,letterSpacing:.8,textTransform:"uppercase",marginBottom:6 }}>Email Address</p>
+          <input type="email" defaultValue={authForm.email} onInput={e=>setAuthForm(p=>({...p,email:e.target.value}))}
+            placeholder="your@email.com" className="glass-input" autoComplete="email"
+            style={{ width:"100%",borderRadius:10,padding:"10px 14px",color:T.text,fontSize:15 }}/>
+        </div>
+
+        {/* Send code button — shown before OTP is sent */}
+        {authStep==="form" && (
+          <Btn variant="solid" full onClick={sendOTP} disabled={authLoading||!authForm.email}>
+            {authLoading?"Sending code...":"Send verification code →"}
+          </Btn>
+        )}
+
+        {/* OTP field — shown after code is sent */}
+        {authStep==="verify" && (
           <>
-            <Field label="Verification code" val={otp} set={setOtp} ph="6-digit code" type="text"/>
-            {otpLeft===0 && <p style={{ color:T.red,fontSize:12,marginBottom:10 }}>Code expired. Go back and request a new one.</p>}
+            <div style={{ background:T.goldFaint,border:`1px solid ${T.goldBorder}`,borderRadius:8,padding:"9px 12px",marginBottom:12,fontSize:13,color:T.gold }}>
+              Code sent to {authForm.email} · expires in {Math.floor(otpLeft/60)}:{String(otpLeft%60).padStart(2,"0")}
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <p style={{ fontSize:11,fontWeight:600,color:T.muted,letterSpacing:.8,textTransform:"uppercase",marginBottom:6 }}>6-Digit Code</p>
+              <input type="text" defaultValue={otp} onInput={e=>setOtp(e.target.value)} placeholder="Enter code" autoFocus
+                maxLength={6} className="glass-input" autoComplete="one-time-code"
+                style={{ width:"100%",borderRadius:10,padding:"10px 14px",color:T.text,fontSize:18,letterSpacing:6,textAlign:"center" }}/>
+            </div>
+            {otpLeft===0 && <p style={{ color:T.red,fontSize:12,marginBottom:10 }}>Code expired. <button onClick={()=>{setAuthStep("form");setOtp("");}} style={{ background:"none",border:"none",color:T.gold,fontSize:12,cursor:"pointer",textDecoration:"underline" }}>Resend</button></p>}
             <div style={{ display:"flex",gap:8 }}>
-              <Btn variant="solid" full onClick={verifyOTP} disabled={authLoading}>{authLoading?"Verifying...":"Verify & Sign in"}</Btn>
+              <Btn variant="solid" full onClick={verifyOTP} disabled={authLoading||otp.length<4}>{authLoading?"Verifying...":"Verify & Sign In"}</Btn>
               <Btn variant="ghost" onClick={()=>{setAuthStep("form");setOtp("");setAuthErr("");}}>Back</Btn>
             </div>
-            <p style={{ color:T.muted,fontSize:11,marginTop:10,lineHeight:1.6 }}>Verification emails are active on the hosted site. In preview, enter any 4+ character code.</p>
           </>
         )}
-        <button onClick={()=>{setShowAuth(false);setAuthStep("form");setOtp("");setAuthErr("");}}
-          style={{ background:"none",border:"none",color:T.muted,fontSize:13,marginTop:16,display:"block",textAlign:"center",width:"100%" }}>
-          Cancel
-        </button>
       </div>
     </div>
   );
@@ -1258,10 +1297,11 @@ Rules:
                   <Btn onClick={()=>navTo("sources")}>Go to Sources</Btn>
                 </div>
               : <>
-                  <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,background:T.input,border:`1px solid ${T.border}`,borderRadius:8,padding:"9px 14px" }}>
+                  <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,background:T.input,border:`1px solid ${T.border}`,borderRadius:8,padding:"9px 14px",flexWrap:"wrap",gap:6 }}>
                     <span style={{ color:T.gold,fontSize:13,fontWeight:500 }}>Q {qi+1} / {mcqs.length}</span>
                     <span style={{ color:T.text,fontSize:14 }}>Score: {score.c}/{score.t}</span>
-                    <Btn sm variant="ghost" onClick={()=>{setQi(0);setAns(null);setScore({c:0,t:0});}}>Restart</Btn>
+                    {quizTimeLeft>0 && <span style={{ color:quizTimeLeft<=10?T.red:T.sub,fontSize:13,fontWeight:600,fontVariantNumeric:"tabular-nums" }}>⏱ {Math.floor(quizTimeLeft/60)}:{String(quizTimeLeft%60).padStart(2,"0")}</span>}
+                    <Btn sm variant="ghost" onClick={()=>{setQi(0);setAns(null);setScore({c:0,t:0});setQuizTimeLeft(mcqs.length*30);}}>Restart</Btn>
                   </div>
                   {mcqs[qi]?.source && <p style={{ color:T.muted,fontSize:12,marginBottom:8 }}>Source: {mcqs[qi].source}</p>}
                   <div style={{ background:T.input,border:`1px solid ${T.border}`,borderRadius:10,padding:"15px 17px",marginBottom:12 }}>
@@ -1286,132 +1326,140 @@ Rules:
                   {ans && qi===mcqs.length-1 && (
                     <div style={{ textAlign:"center",padding:"24px 0" }}>
                       <p style={{ fontSize:20,fontWeight:600,color:T.text,marginBottom:8 }}>Quiz Complete</p>
-                      <p style={{ color:T.sub,fontSize:16,marginBottom:20 }}>Score: {score.c}/{score.t} ({Math.round(score.c/score.t*100)}%)</p>
-                      <Btn onClick={()=>{setQi(0);setAns(null);setScore({c:0,t:0});}}>Try Again</Btn>
+                      <p style        {/* ── GROUP STUDY ROOMS ─────────────────────────────────────────────*/}
+        {tab==="group" && (() => {
+          const roomBottomRef2 = useRef(null);
+          useEffect(() => { roomBottomRef2.current?.scrollIntoView({ behavior:"smooth" }); }, [wsRoom?.messages?.length]);
+
+          const connectWS = (action, payload) => {
+            setWsStatus("connecting");
+            const ws = new WebSocket(WS_URL.replace("/api",""));
+            ws.onopen = () => {
+              setWsStatus("connected");
+              ws.send(JSON.stringify({ type:action, name:user?.name||user?.email||"Student", avatar:user?.avatar||null, ...payload }));
+            };
+            ws.onmessage = (e) => {
+              const d = JSON.parse(e.data);
+              if (d.type==="joined") setWsRoom({ ...d.room, code:d.code });
+              if (d.type==="message") setWsRoom(r => r ? ({ ...r, messages:[...r.messages, d.message], members:d.members }) : r);
+              if (d.type==="error") { alert(d.msg); ws.close(); setWsStatus("disconnected"); }
+            };
+            ws.onclose = () => { setWsStatus("disconnected"); setWsConn(null); };
+            ws.onerror = () => { setWsStatus("disconnected"); };
+            setWsConn(ws);
+          };
+
+          const sendRoomMsg = () => {
+            if (!roomMsg.trim() || !wsConn || wsConn.readyState!==1) return;
+            wsConn.send(JSON.stringify({ type:"message", text:roomMsg.trim(), avatar:user?.avatar||null }));
+            setRoomMsg("");
+          };
+
+          const leaveRoom = () => {
+            if (wsConn) { wsConn.send(JSON.stringify({type:"leave"})); wsConn.close(); }
+            setWsRoom(null); setWsStatus("disconnected"); setWsConn(null);
+          };
+
+          // In room view
+          if (wsRoom) return (
+            <div style={{ flex:1,display:"flex",flexDirection:"column",overflow:"hidden" }}>
+              {/* Header */}
+              <div style={{ padding:"12px 18px",borderBottom:`1px solid ${T.glassBorder}`,background:"transparent",backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",display:"flex",alignItems:"center",gap:12,flexShrink:0 }}>
+                <div style={{ flex:1,minWidth:0 }}>
+                  <p style={{ color:T.text,fontSize:15,fontWeight:600 }}>{wsRoom.name}</p>
+                  <p style={{ color:T.muted,fontSize:12,marginTop:1 }}>{wsRoom.members?.length||1} member{(wsRoom.members?.length||1)>1?"s":""} · {wsRoom.members?.join(", ")}</p>
+                </div>
+                <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+                  <div style={{ background:T.input,border:`1px solid ${T.goldBorder}`,borderRadius:6,padding:"4px 10px",textAlign:"center" }}>
+                    <p style={{ color:T.muted,fontSize:9,textTransform:"uppercase",letterSpacing:1 }}>Code</p>
+                    <p style={{ color:T.gold,fontSize:14,fontWeight:700,letterSpacing:2 }}>{wsRoom.code}</p>
+                  </div>
+                  <button onClick={()=>navigator.clipboard?.writeText(wsRoom.code)} style={{ background:T.input,border:`1px solid ${T.border}`,color:T.muted,padding:"5px 10px",borderRadius:6,fontSize:12 }}>Copy</button>
+                  <button onClick={leaveRoom} style={{ background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.2)",color:T.red,padding:"5px 10px",borderRadius:6,fontSize:12 }}>Leave</button>
+                </div>
+              </div>
+
+              {/* Messages */}
+              <div style={{ flex:1,overflowY:"auto",padding:"16px 18px",display:"flex",flexDirection:"column",gap:10 }}>
+                {wsRoom.messages?.map((msg,i) => {
+                  const isGnosis = msg.from==="Gnosis";
+                  const isMe = msg.from===(user?.name||user?.email||"Student");
+                  const isSystem = msg.system;
+                  if (isSystem) return (
+                    <p key={i} style={{ textAlign:"center",color:T.muted,fontSize:12,padding:"4px 0" }}>{msg.text}</p>
+                  );
+                  return (
+                    <div key={i} style={{ display:"flex",justifyContent:isMe?"flex-end":"flex-start",alignItems:"flex-end",gap:8 }}>
+                      {!isMe && (
+                        <div style={{ width:28,height:28,borderRadius:"50%",background:isGnosis?T.goldFaint:T.input,border:`1px solid ${isGnosis?T.goldBorder:T.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:isGnosis?10:13,flexShrink:0 }}>
+                          {isGnosis?"G":msg.from?.[0]?.toUpperCase()||"?"}
+                        </div>
+                      )}
+                      <div style={{ maxWidth:"72%" }}>
+                        {!isMe && <p style={{ color:T.muted,fontSize:11,marginBottom:3 }}>{msg.from}</p>}
+                        <div style={{ background:isMe?T.userBg:isGnosis?T.goldFaint:T.aiBg,border:`1px solid ${isMe?T.userBorder:isGnosis?T.goldBorder:T.aiBorder}`,borderRadius:isMe?"14px 4px 14px 14px":"4px 14px 14px 14px",padding:"10px 14px",backdropFilter:"blur(8px)",WebkitBackdropFilter:"blur(8px)" }}>
+                          <p style={{ color:isMe?T.userText:T.text,fontSize:14,lineHeight:1.7,whiteSpace:"pre-wrap" }}>{msg.text}</p>
+                        </div>
+                        <p style={{ color:T.muted,fontSize:10,marginTop:3,textAlign:isMe?"right":"left" }}>{new Date(msg.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
+                      </div>
+                      {isMe && user?.avatar && <img src={user.avatar} alt="" style={{ width:28,height:28,borderRadius:"50%",objectFit:"cover",flexShrink:0 }}/>}
                     </div>
-                  )}
-                </>
-            }
-            <Footer/>
-          </div>
-        )}
-
-                {/* ── GROUP STUDY ROOMS ─────────────────────────────────────────────*/}
-        {tab==="group" && (
-          <div style={{ flex:1,display:"flex",overflow:"hidden" }}>
-            {/* Room list */}
-            <div style={{ width:220,flexShrink:0,borderRight:`1px solid ${T.glassBorder}`,background:"transparent",backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",display:"flex",flexDirection:"column",padding:14,gap:8,overflow:"hidden",boxShadow:`inset -1px 0 0 ${T.glassShine}` }}>
-              <p style={{ fontSize:11,fontWeight:600,color:T.muted,letterSpacing:.8,textTransform:"uppercase",marginBottom:4 }}>Study Rooms</p>
-
-              {/* Create room */}
-              <div style={{ background:T.glass,border:`1px solid ${T.glassBorder}`,borderRadius:10,padding:10,backdropFilter:"blur(8px)",WebkitBackdropFilter:"blur(8px)" }}>
-                <p style={{ color:T.text,fontSize:12,fontWeight:500,marginBottom:6 }}>New room</p>
-                <input value={roomName} onChange={e=>setRoomName(e.target.value)} placeholder="Room name..."
-                  style={{ width:"100%",background:"transparent",border:"none",color:T.text,fontSize:13,marginBottom:8 }}
-                  onKeyDown={e=>{ if(e.key==="Enter") createRoom(); }}/>
-                <Btn sm full onClick={createRoom} disabled={!roomName.trim()}>Create</Btn>
+                  );
+                })}
+                <div ref={roomBottomRef2}/>
               </div>
 
-              {/* Join room */}
-              <div style={{ background:T.glass,border:`1px solid ${T.glassBorder}`,borderRadius:10,padding:10,backdropFilter:"blur(8px)",WebkitBackdropFilter:"blur(8px)" }}>
-                <p style={{ color:T.text,fontSize:12,fontWeight:500,marginBottom:6 }}>Join with code</p>
-                <input value={joinCode} onChange={e=>setJoinCode(e.target.value.toUpperCase())} placeholder="e.g. A3X9M2"
-                  style={{ width:"100%",background:"transparent",border:"none",color:T.gold,fontSize:14,letterSpacing:2,fontWeight:600,marginBottom:8 }}
-                  maxLength={6} onKeyDown={e=>{ if(e.key==="Enter") joinRoom(); }}/>
-                <Btn sm full onClick={joinRoom} disabled={!joinCode.trim()}>Join</Btn>
-              </div>
-
-              {/* Room list */}
-              <div style={{ flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:5 }}>
-                {Object.entries(rooms).map(([code, room]) => (
-                  <button key={code} onClick={()=>setCurrentRoom(code)}
-                    style={{ background:currentRoom===code?T.goldFaint:"transparent",border:`1px solid ${currentRoom===code?T.goldBorder:"transparent"}`,
-                      borderRadius:7,padding:"8px 10px",textAlign:"left",transition:"all .18s",width:"100%" }}
-                    onMouseEnter={e=>{ if(currentRoom!==code) e.currentTarget.style.background=T.input; }}
-                    onMouseLeave={e=>{ if(currentRoom!==code) e.currentTarget.style.background="transparent"; }}>
-                    <p style={{ color:currentRoom===code?T.gold:T.text,fontSize:13,fontWeight:500,marginBottom:2 }}>{room.name}</p>
-                    <p style={{ color:T.muted,fontSize:10 }}>
-                      <span style={{ background:T.goldFaint,border:`1px solid ${T.goldBorder}`,color:T.gold,padding:"1px 5px",borderRadius:4,fontSize:9,letterSpacing:1,fontWeight:600 }}>{code}</span>
-                      {" "}{room.members.length} member{room.members.length>1?"s":""}
-                    </p>
-                  </button>
-                ))}
-                {Object.keys(rooms).length===0 && <p style={{ color:T.muted,fontSize:12,textAlign:"center",marginTop:20,lineHeight:1.6 }}>No rooms yet. Create one or join with a code.</p>}
+              {/* Input */}
+              <div style={{ padding:"12px 16px",borderTop:`1px solid ${T.glassBorder}`,background:"transparent",backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",flexShrink:0 }}>
+                <p style={{ color:T.muted,fontSize:11,marginBottom:6 }}>End message with ? or start with @gnosis to get AI help</p>
+                <div style={{ display:"flex",gap:10,alignItems:"flex-end" }}>
+                  <textarea value={roomMsg} onChange={e=>setRoomMsg(e.target.value)} placeholder="Type a message..."
+                    rows={2} onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendRoomMsg();} }}
+                    style={{ flex:1,background:T.input,border:`1px solid ${T.glassBorder}`,borderRadius:10,padding:"10px 12px",color:T.text,fontSize:14,lineHeight:1.5,fontFamily:"inherit",backdropFilter:"blur(8px)" }}/>
+                  <Btn variant="solid" onClick={sendRoomMsg} disabled={!roomMsg.trim()||wsStatus!=="connected"}>Send</Btn>
+                </div>
               </div>
             </div>
+          );
 
-            {/* Room chat */}
-            {currentRoom && rooms[currentRoom] ? (
-              <div style={{ flex:1,display:"flex",flexDirection:"column",overflow:"hidden" }}>
-                {/* Room header */}
-                <div style={{ padding:"12px 18px",borderBottom:`1px solid ${T.border}`,background:T.panel,display:"flex",alignItems:"center",gap:12,flexShrink:0 }}>
-                  <div>
-                    <p style={{ color:T.text,fontSize:15,fontWeight:600 }}>{rooms[currentRoom].name}</p>
-                    <p style={{ color:T.muted,fontSize:12,marginTop:1 }}>{rooms[currentRoom].members.length} member{rooms[currentRoom].members.length>1?"s":""} · {rooms[currentRoom].members.join(", ")}</p>
-                  </div>
-                  <div style={{ marginLeft:"auto",display:"flex",alignItems:"center",gap:10 }}>
-                    <div style={{ background:T.input,border:`1px solid ${T.goldBorder}`,borderRadius:6,padding:"4px 10px" }}>
-                      <p style={{ color:T.muted,fontSize:9,textTransform:"uppercase",letterSpacing:1,marginBottom:1 }}>Room Code</p>
-                      <p style={{ color:T.gold,fontSize:14,fontWeight:700,letterSpacing:2 }}>{currentRoom}</p>
-                    </div>
-                    <button onClick={()=>{ navigator.clipboard?.writeText(currentRoom); }} style={{ background:T.input,border:`1px solid ${T.border}`,color:T.muted,padding:"5px 10px",borderRadius:6,fontSize:12 }}>Copy</button>
-                  </div>
-                </div>
+          // Lobby view
+          return (
+            <div style={{ flex:1,overflowY:"auto",padding:24,maxWidth:480,margin:"0 auto",width:"100%" }}>
+              <PageHeader title="Study Rooms" sub="Create a room or join one. Real-time group chat with AI support."/>
 
-                {/* Messages */}
-                <div style={{ flex:1,overflowY:"auto",padding:"16px 18px",display:"flex",flexDirection:"column",gap:10 }}>
-                  {rooms[currentRoom].messages.map((m,i) => {
-                    const isGnosis = m.from==="Gnosis";
-                    const isSystem = m.system;
-                    if (isSystem) return <p key={i} style={{ textAlign:"center",color:T.muted,fontSize:12,padding:"4px 0" }}>{m.text}</p>;
-                    return (
-                      <div key={i} style={{ display:"flex",alignItems:"flex-start",gap:8,justifyContent:isGnosis?"flex-start":"flex-end" }}>
-                        {isGnosis && <div style={{ width:26,height:26,borderRadius:"50%",border:`1px solid ${T.goldBorder}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Cinzel',serif",fontSize:9,color:T.gold,background:T.goldFaint,flexShrink:0,marginTop:2 }}>G</div>}
-                        <div style={{ maxWidth:"70%" }}>
-                          {!isGnosis && <p style={{ color:T.muted,fontSize:11,marginBottom:3,textAlign:"right" }}>{m.from}</p>}
-                          <div style={{ background:isGnosis?T.aiBg:T.userBg,border:`1px solid ${isGnosis?T.aiBorder:T.userBorder}`,
-                            borderRadius:isGnosis?"4px 12px 12px 12px":"12px 4px 12px 12px",
-                            padding:"10px 13px",color:isGnosis?T.sub:T.userText,fontSize:14,lineHeight:1.75,whiteSpace:"pre-wrap" }}>
-                            {m.text}
-                            {isGnosis && ttsOK && <button onClick={()=>speak(m.text)} style={{ display:"block",marginTop:6,background:"none",border:"none",color:T.muted,fontSize:11,padding:0 }}>Listen</button>}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {roomLoading && (
-                    <div style={{ display:"flex",alignItems:"flex-start",gap:8 }}>
-                      <div style={{ width:26,height:26,borderRadius:"50%",border:`1px solid ${T.goldBorder}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Cinzel',serif",fontSize:9,color:T.gold,background:T.goldFaint }}>G</div>
-                      <div style={{ background:T.aiBg,border:`1px solid ${T.aiBorder}`,borderRadius:"4px 12px 12px 12px" }}><Dots c={T.gold}/></div>
-                    </div>
-                  )}
-                  <div ref={roomBottomRef}/>
-                </div>
+              {wsStatus==="connecting" && <p style={{ color:T.gold,fontSize:13,marginBottom:16,textAlign:"center" }}>Connecting...</p>}
 
-                {/* Room input */}
-                <div style={{ padding:"10px 14px",borderTop:`1px solid ${T.border}`,background:T.nav,backdropFilter:"blur(12px)",flexShrink:0 }}>
-                  <div style={{ display:"flex",gap:6,alignItems:"flex-end",background:T.input,border:`1px solid ${T.border}`,borderRadius:10,padding:"8px 10px" }}>
-                    <textarea value={roomMsg} onChange={e=>setRoomMsg(e.target.value)} onKeyDown={roomHandleKey}
-                      placeholder="Message the room... Gnosis is here too." rows={1}
-                      style={{ flex:1,background:"transparent",border:"none",color:T.text,fontSize:15,lineHeight:1.5,maxHeight:100,caretColor:T.gold,resize:"none" }}/>
-                    {ttsOK && <button onClick={()=>speaking?stopSpeak():speak(rooms[currentRoom].messages.at(-1)?.text||"")} style={{ width:28,height:28,borderRadius:6,border:`1px solid ${speaking?T.gold:T.border}`,background:speaking?T.goldFaint:"transparent",color:speaking?T.gold:T.muted,fontSize:13,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center" }}>🔊</button>}
-                    <button onClick={sendRoomMsg} disabled={roomLoading||!roomMsg.trim()}
-                      style={{ width:28,height:28,borderRadius:6,border:"none",flexShrink:0,
-                        background:roomMsg.trim()&&!roomLoading?T.gold:T.input,
-                        color:roomMsg.trim()&&!roomLoading?(dark?"#07070f":"#fff"):T.muted,
-                        fontSize:16,fontWeight:600,transition:"all .18s" }}>↑</button>
-                  </div>
-                  <p style={{ color:T.muted,fontSize:10,opacity:.4,marginTop:5 }}>Share the room code <strong style={{ color:T.gold }}>{currentRoom}</strong> for others to join</p>
+              <div style={{ marginBottom:20 }}>
+                <p style={{ fontSize:12,fontWeight:600,color:T.muted,letterSpacing:.6,textTransform:"uppercase",marginBottom:10 }}>Create a Room</p>
+                <div style={{ background:T.glass,border:`1px solid ${T.glassBorder}`,borderRadius:12,padding:16,backdropFilter:"blur(12px)" }}>
+                  <input defaultValue={roomName} onInput={e=>setRoomName(e.target.value)} placeholder="Room name e.g. Anatomy Study Group"
+                    className="glass-input" style={{ width:"100%",borderRadius:8,padding:"10px 12px",color:T.text,fontSize:14,marginBottom:12 }}/>
+                  <Btn variant="solid" full onClick={()=>{ if(!roomName.trim()) return; connectWS("create",{roomName:roomName.trim()}); }} disabled={wsStatus==="connecting"||!roomName.trim()}>
+                    Create Room →
+                  </Btn>
                 </div>
               </div>
-            ) : (
-              <div style={{ flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,padding:32 }}>
-                <p style={{ fontSize:32,opacity:.3 }}>⊛</p>
-                <p style={{ color:T.sub,fontSize:15,textAlign:"center",lineHeight:1.7,maxWidth:300 }}>Create a study room or join one with a code. Gnosis will be in the room to help your group study.</p>
+
+              <div>
+                <p style={{ fontSize:12,fontWeight:600,color:T.muted,letterSpacing:.6,textTransform:"uppercase",marginBottom:10 }}>Join with Code</p>
+                <div style={{ background:T.glass,border:`1px solid ${T.glassBorder}`,borderRadius:12,padding:16,backdropFilter:"blur(12px)" }}>
+                  <input defaultValue={wsJoinCode} onInput={e=>setWsJoinCode(e.target.value.toUpperCase())} placeholder="Enter 6-digit room code"
+                    maxLength={6} className="glass-input"
+                    style={{ width:"100%",borderRadius:8,padding:"10px 12px",color:T.gold,fontSize:20,letterSpacing:6,fontWeight:600,textAlign:"center",marginBottom:12 }}/>
+                  <Btn variant="solid" full onClick={()=>{ if(!wsJoinCode.trim()) return; connectWS("join",{code:wsJoinCode.trim()}); }} disabled={wsStatus==="connecting"||wsJoinCode.length<6}>
+                    Join Room →
+                  </Btn>
+                </div>
               </div>
-            )}
-          </div>
-        )}
+
+              <div style={{ marginTop:20,padding:14,background:T.goldFaint,border:`1px solid ${T.goldBorder}`,borderRadius:10 }}>
+                <p style={{ color:T.gold,fontSize:13,fontWeight:500,marginBottom:4 }}>How it works</p>
+                <p style={{ color:T.sub,fontSize:13,lineHeight:1.7 }}>Create a room and share the 6-digit code with your study group. Everyone who joins can chat in real time. Ask a question ending with ? and Gnosis will answer for the whole group.</p>
+              </div>
+              <Footer/>
+            </div>
+          );
+        })()}
 
         {/* ── PAST QUESTIONS ────────────────────────────────────────────────*/}
         {tab==="pastq" && (
