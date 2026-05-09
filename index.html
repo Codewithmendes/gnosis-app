@@ -221,7 +221,9 @@ function Gnosis() {
   const [loading, setLoading] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [listening, setListening] = useState(false);
-  const [photo, setPhoto] = useState(null);
+  const [photo, setPhoto] = useState(null); // { data, type, name, preview } for images
+  const [chatFile, setChatFile] = useState(null); // { text, name } for docs
+  const chatFileRef = useRef(null);
   const [insights, setInsights] = useState("");
   const voiceOK = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   const ttsOK = "speechSynthesis" in window;
@@ -558,18 +560,61 @@ ${fcInput.slice(0,3000)}` }] })
   // ── SEND CHAT ─────────────────────────────────────────────────────────────
   const send = async (override) => {
     const msg = override || input;
-    if (!msg?.trim() && !photo) return;
+    if (!msg?.trim() && !photo && !chatFile) return;
     if (loading) return;
     setInput(""); if (taRef.current) taRef.current.style.height = "auto";
-    const content = photo
-      ? [{ type:"image", source:{ type:"base64", media_type:photo.type, data:photo.data }},
-         { type:"text", text:msg?.trim() || "Analyse this image in full detail." }]
-      : msg.trim();
-    setPhoto(null);
-    const next = [...msgs, { role:"user", content }];
+
+    let content = msg?.trim() || "";
+    let userMsgDisplay = { role:"user", content:"" };
+
+    if (photo) {
+      // Step 1: Get vision description from backend
+      setLoading(true);
+      setMsgs(prev => [...prev, { role:"user", content:[
+        { type:"image_preview", previewUrl:photo.previewUrl, name:photo.name },
+        { type:"text", text:msg?.trim()||"Analyse this image in full detail." }
+      ]}]);
+      try {
+        const vr = await fetch(`${BACKEND}/api/explain`, {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ imageData:photo.data, mimeType:photo.type })
+        });
+        const vd = await vr.json();
+        const imgDesc = vd.reply || "I could not read the image.";
+        // Now send image description + user question as chat context
+        const imageContext = `[The student uploaded an image: ${photo.name}. Here is what the image contains: ${imgDesc}]
+
+Student question: ${msg?.trim()||"Please explain this image."}`;
+        const chatMsgs = [...msgs, { role:"user", content: imageContext }];
+        const r = await fetch(`${BACKEND}/api/chat`, {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ messages: chatMsgs.filter(m=>!m.hidden).map(m=>({role:m.role,content:typeof m.content==="string"?m.content:Array.isArray(m.content)?m.content.find(b=>b.type==="text")?.text||imageContext:imageContext})), studentInsights:insights })
+        });
+        const d = await r.json();
+        const reply = d.reply || "No response.";
+        setMsgs(prev => [...prev, { role:"assistant", content:reply }]);
+      } catch (e) {
+        setMsgs(prev => [...prev, { role:"assistant", content:`Connection error. (${e.message})` }]);
+      }
+      setPhoto(null); setLoading(false); return;
+    }
+
+    if (chatFile) {
+      content = `[Document: ${chatFile.name}]
+
+${chatFile.text}
+
+${msg?.trim()||"Summarise this document and help me study it."}`;
+      userMsgDisplay = { role:"user", content:`📄 ${chatFile.name}${msg?.trim()?" — "+msg.trim():""}` };
+      setChatFile(null);
+    } else {
+      userMsgDisplay = { role:"user", content: content };
+    }
+
+    const next = [...msgs, userMsgDisplay];
     setMsgs(next); setLoading(true);
     try {
-      const apiMsgs = next.filter(m => !m.hidden).map(m => ({ role:m.role, content:m.content }));
+      const apiMsgs = [...msgs, { role:"user", content }].filter(m => !m.hidden).map(m => ({ role:m.role, content:typeof m.content==="string"?m.content:Array.isArray(m.content)?m.content.find(b=>b.type==="text")?.text||"":JSON.stringify(m.content) }));
       const r = await fetch(`${BACKEND}/api/chat`, {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ messages:apiMsgs, studentInsights:insights })
@@ -601,7 +646,44 @@ ${fcInput.slice(0,3000)}` }] })
   };
 
   // ── PHOTO ─────────────────────────────────────────────────────────────────
-  const handlePhoto = f => { if (!f) return; const r = new FileReader(); r.onload = e => setPhoto({ data:e.target.result.split(",")[1], type:f.type, name:f.name }); r.readAsDataURL(f); };
+  const handlePhoto = f => {
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = e => {
+      const data = e.target.result.split(",")[1];
+      // Create a small preview URL too
+      const previewUrl = e.target.result;
+      setPhoto({ data, type:f.type, name:f.name, previewUrl });
+    };
+    r.readAsDataURL(f);
+  };
+
+  const handleChatFile = async (f) => {
+    if (!f) return;
+    const ext = f.name.split(".").pop().toLowerCase();
+    if (["jpg","jpeg","png","gif","webp","bmp"].includes(ext)) { handlePhoto(f); return; }
+    if (ext === "txt" || ext === "md") {
+      const text = await f.text();
+      setChatFile({ text: text.slice(0,6000), name: f.name });
+    } else if (ext === "pdf") {
+      // Send to backend vision endpoint to extract text
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const base64 = e.target.result.split(",")[1];
+        try {
+          const r = await fetch(`${BACKEND}/api/explain`, {
+            method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({ imageData:base64, mimeType:"application/pdf", extractOnly:true })
+          });
+          const d = await r.json();
+          setChatFile({ text:(d.reply||"").slice(0,6000), name:f.name });
+        } catch { setChatFile({ text:"Could not read PDF.", name:f.name }); }
+      };
+      reader.readAsDataURL(f);
+    } else {
+      alert("Supported: images (jpg,png,gif,webp), PDF, txt, md");
+    }
+  };
 
   // ── SLIDES ────────────────────────────────────────────────────────────────
   const uploadFiles = async (files) => {
@@ -1127,7 +1209,7 @@ Rules:
               {msgs.filter(m=>!m.hidden).map((msg,i)=>{
                 const isU = msg.role==="user";
                 const txt = typeof msg.content==="string" ? msg.content : Array.isArray(msg.content) ? msg.content.find(b=>b.type==="text")?.text||"" : "";
-                const hasImg = Array.isArray(msg.content) && msg.content.find(b=>b.type==="image");
+                const imgPreview = Array.isArray(msg.content) && msg.content.find(b=>b.type==="image_preview");
                 return (
                   <div key={i} style={{ display:"flex",justifyContent:isU?"flex-end":"flex-start",alignItems:"flex-start",gap:8 }}>
                     {!isU && <div style={{ width:28,height:28,borderRadius:"50%",border:`1px solid ${T.goldBorder}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Cinzel',serif",fontSize:10,color:T.gold,flexShrink:0,marginTop:2,background:T.goldFaint }}>G</div>}
@@ -1135,8 +1217,14 @@ Rules:
                       border:`1px solid ${isU?T.userBorder:T.aiBorder}`,
                       borderRadius:isU?"14px 4px 14px 14px":"4px 14px 14px 14px",
                       padding:"11px 15px",color:isU?T.userText:T.text,
-                      fontSize:15,lineHeight:1.75,whiteSpace:"pre-wrap" }}>
-                      {hasImg && <p style={{ fontSize:11,color:T.gold,opacity:.7,marginBottom:5 }}>Image attached</p>}
+                      fontSize:15,lineHeight:1.75,whiteSpace:"pre-wrap",overflow:"hidden" }}>
+                      {imgPreview && (
+                        <div style={{ marginBottom:8 }}>
+                          <img src={imgPreview.previewUrl} alt={imgPreview.name}
+                            style={{ maxWidth:"100%",maxHeight:200,borderRadius:8,display:"block",objectFit:"cover" }}/>
+                          <p style={{ fontSize:11,color:T.gold,opacity:.7,marginTop:4 }}>📷 {imgPreview.name}</p>
+                        </div>
+                      )}
                       {txt}
                       {!isU && ttsOK && <button onClick={()=>speak(txt)} style={{ display:"block",marginTop:8,background:"none",border:"none",color:T.muted,fontSize:12,padding:0 }}>Listen</button>}
                     </div>
@@ -1172,8 +1260,10 @@ Rules:
               <div style={{ display:"flex",gap:6,alignItems:"flex-end",background:T.input,border:`1px solid ${T.border}`,borderRadius:12,padding:"8px 10px",transition:"border .2s" }}
                 onFocus={e=>e.currentTarget.style.borderColor=T.goldBorder}
                 onBlur={e=>e.currentTarget.style.borderColor=T.border}>
-                <button onClick={()=>photoRef.current?.click()} style={{ width:30,height:30,borderRadius:7,border:`1px solid ${T.border}`,background:"transparent",color:T.muted,fontSize:14,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center" }}>📷</button>
-                <input ref={photoRef} type="file" accept="image/*" style={{ display:"none" }} onChange={e=>handlePhoto(e.target.files[0])}/>
+                <button onClick={()=>chatFileRef.current?.click()}
+                  style={{ width:30,height:30,borderRadius:7,border:`1px solid ${T.border}`,background:"transparent",color:T.muted,fontSize:14,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center" }}>📎</button>
+                <input ref={chatFileRef} type="file" accept="image/*,.pdf,.txt,.md"
+                  style={{ display:"none" }} onChange={e=>handleChatFile(e.target.files[0])}/>
                 <textarea ref={taRef} value={input}
                   onChange={e=>{ setInput(e.target.value); e.target.style.height="auto"; e.target.style.height=Math.min(e.target.scrollHeight,120)+"px"; }}
                   onKeyDown={handleKey} placeholder={listening?"Listening...":"Ask anything across any faculty..."}
